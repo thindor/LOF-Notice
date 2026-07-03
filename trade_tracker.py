@@ -119,7 +119,6 @@ def record_sell(code: str, sell_date: str, sell_price: float, note: str = "") ->
             trade["realized_pnl"] = round(pnl, 2)
             trade["note"] = note
 
-            # 更新汇总
             data["summary"]["total_realized_pnl"] = round(
                 data["summary"].get("total_realized_pnl", 0) + pnl, 2
             )
@@ -136,8 +135,6 @@ def update_market_prices(prices: dict[str, float]) -> list[dict]:
     """
     更新所有持仓的市场价格并计算浮盈亏，同时持久化到文件
     prices: {code: current_price}
-
-    返回：持仓列表（含浮盈计算）
     """
     data = _load_trades()
     holdings = []
@@ -154,19 +151,14 @@ def update_market_prices(prices: dict[str, float]) -> list[dict]:
         if current_price > 0:
             current_value = units * current_price
             unrealized_pnl = current_value - cost
-
-            # 如果已到结算日，按当前价格计算"可卖出盈亏"
             settle_date = datetime.strptime(trade["settle_date"], "%Y-%m-%d")
             can_sell = datetime.now() >= settle_date
-
-            # 持久化到trade记录中
             trade["current_price"] = round(current_price, 4)
             trade["current_value"] = round(current_value, 2)
             trade["unrealized_pnl"] = round(unrealized_pnl, 2)
             trade["unrealized_pnl_pct"] = round(unrealized_pnl / cost * 100, 2) if cost > 0 else 0
             trade["can_sell"] = can_sell
             trade["days_held"] = (datetime.now() - datetime.strptime(trade["buy_date"], "%Y-%m-%d")).days
-
             holdings.append({**trade})
         else:
             trade["current_price"] = 0
@@ -175,15 +167,12 @@ def update_market_prices(prices: dict[str, float]) -> list[dict]:
             trade["unrealized_pnl_pct"] = 0
             trade["can_sell"] = False
             trade["days_held"] = (datetime.now() - datetime.strptime(trade["buy_date"], "%Y-%m-%d")).days
-
             holdings.append({**trade})
 
-    # 更新汇总
     total_unrealized = sum(h.get("unrealized_pnl", 0) for h in holdings)
     data["summary"]["total_unrealized_pnl"] = round(total_unrealized, 2)
     data["summary"]["total_invested"] = len(data["trades"]) * BUY_AMOUNT
     _save_trades(data)
-
     return holdings
 
 
@@ -192,10 +181,8 @@ def get_holdings_summary() -> dict:
     data = _load_trades()
     holdings = [t for t in data["trades"] if t["status"] == "holding"]
     sold = [t for t in data["trades"] if t["status"] == "sold"]
-
     total_realized = sum(t.get("realized_pnl", 0) for t in sold)
     total_invested = len(data["trades"]) * BUY_AMOUNT
-
     return {
         "total_trades": len(data["trades"]),
         "active_holdings": len(holdings),
@@ -204,69 +191,44 @@ def get_holdings_summary() -> dict:
         "total_realized_pnl": round(total_realized, 2),
         "total_realized_pnl_pct": round(total_realized / total_invested * 100, 2) if total_invested > 0 else 0,
         "holdings": holdings,
-        "closed": sold[-10:],  # 最近10笔已平仓
+        "closed": sold[-10:],
     }
 
 
 def auto_buy_opportunities(opportunities: list[dict]) -> list[dict]:
     """
     对符合条件的机会自动模拟买入
-    条件：溢价>3% + 开放申购（或限大额且日限额>=100）+ 成交额>1万
+    条件：溢价>3%（实时估值口径） + 开放申购（或限大额且日限额>=100）+ 成交额>=1000万
     有色/资源类LOF溢价需>5%才买入
-    返回：新买入的交易列表
     """
-    # 有色/资源类关键词（与fetcher.py保持一致）
     RESOURCE_KW = ["有色", "资源", "大宗商品", "煤炭", "钢铁", "矿业", "黄金", "白银"]
-
     def _is_resource(name: str) -> bool:
         return any(kw in name for kw in RESOURCE_KW)
-
     new_trades = []
-    today = get_today_str()
-
     for opp in opportunities:
-        # 只需溢价品种
         if not opp.get("is_premium", False):
             continue
-
-        # 申购状态必须是开放申购或限大额（且限额>=100元）
         status = opp.get("purchase_status", "未知")
         daily_limit = opp.get("daily_limit", 0)
-
         if "暂停" in status or "封闭" in status:
             continue
         if "限" in status and daily_limit > 0 and daily_limit < 100:
             continue
-        # 状态未知的不自动买入（保守）
         if status == "未知":
             continue
-
-        # 成交额检查
-        if opp.get("amount", 0) < 10000:
+        if opp.get("amount", 0) < 10_000_000:
             continue
-
-        # 溢价检查
-        premium = opp.get("premium_rt", 0)
+        premium = opp.get("premium_rt_est", opp.get("premium_rt", 0))
         name = opp.get("name", "")
         min_premium = 5.0 if _is_resource(name) else 3.0
         if abs(premium) < min_premium:
             continue
-
-        # 使用核实后的净值
-        nav = opp.get("nav_verified", opp.get("nav", 0))
+        nav = opp.get("est_nav", 0) or opp.get("nav_verified", opp.get("nav", 0))
         if nav <= 0:
             continue
-
-        trade = record_buy(
-            code=opp["code"],
-            name=opp["name"],
-            nav=nav,
-            premium_rt=premium,
-            daily_limit=daily_limit,
-        )
+        trade = record_buy(code=opp["code"], name=opp["name"], nav=nav, premium_rt=premium, daily_limit=daily_limit)
         if trade:
             new_trades.append(trade)
-
     return new_trades
 
 
@@ -277,7 +239,6 @@ def clear_trades() -> None:
 
 
 if __name__ == "__main__":
-    # 测试
     print("=== 当前持仓 ===")
     summary = get_holdings_summary()
     print(json.dumps(summary, ensure_ascii=False, indent=2))
