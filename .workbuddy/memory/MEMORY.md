@@ -64,10 +64,18 @@ C:/Users/Administrator/.workbuddy/binaries/python/envs/lofnotice/Scripts/python.
 5. AKShare — 备用4
 6. 本地集思录缓存 — 兜底
 
-## 基金规模获取（2026-07-01 新增）
+## 基金规模获取（2026-07-01 新增，07-29 增强）
 - 从东财基金详情页HTML解析：`规模</a>：XX.XX亿元（YYYY-MM-DD）`
 - 每批次并发5只，最多检查前30只（按成交额排序）
 - 规模未知的不做过滤（不误杀），仅对已知规模应用≥2亿限制
+- **07-29新增**：东财缺失的用新浪f_接口返回的规模(亿)兜底（fund_size_sina）
+
+## 净值核实多源架构（2026-07-29 重大修复）
+- **天天基金fundgz估值接口已下线**（返回404页面，非限流）→ 7/21起0/60失败的根因
+- verify_navs_batch 三级降级：探测fundgz(1只探针) → 存活则逐只(含est_nav盘中估值) → 失败的用新浪 `hq.sinajs.cn/list=f_<code>` 批量兜底（50只/请求，GBK，需Referer: finance.sina.com.cn）
+- 新浪f_返回：`名称,单位净值,累计净值,前日净值,净值日期,规模(亿)`，无盘中估值
+- est_nav兜底：enrich_with_lof8 用 lof8.cn 的 estNav 补盘中估算净值+premium_rt_est
+- **潜伏bug修复**：filter_arbitrage_opportunities 的 `**item` 曾放字典末尾，原始premium_rt(0)覆盖计算值 → 已移到最前
 
 ## 已确认的案例
 - 160644 港美互联网LOF: 2026-05-27鹏华公告, 5月28日起暂停申购 → 套利通道关闭
@@ -116,6 +124,13 @@ C:/Users/Administrator/.workbuddy/binaries/python/envs/lofnotice/Scripts/python.
 - **修复**: 新增腾讯财经API(qt.gtimg.cn)作为实时行情主源，免代理直连
 - **数据优先级**: 东财(curl) → 集思录API → 腾讯财经(新) → AKShare → 本地缓存
 - **注**: 周六非交易日，数据为周五收盘价+最新净值，属正常
+
+## 日报输出格式（2026-07-08 确认）
+- **文字叙事为主，少用表格**
+- 免责声明放报告开头第一行
+- 结构：数据概况 → 筛选结果 → 落选品种分析（原因解释）→ 交易情况 → 累计统计 → 一句话总结
+- 风格：平实口语化，像在跟朋友说今天盯盘看到了什么
+- **所有基金必须标注代码**：首次提及写"名称（代码）"，后续可用简称但同样带代码
 
 ## 自动卖出BUG（已修复 2026-06-25）
 - **问题**: refresh_cache 中 auto-sell 逻辑在 `if result.get("data"):` 块内

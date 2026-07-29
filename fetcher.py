@@ -298,6 +298,7 @@ async def fetch_lof8_status() -> dict[str, dict]:
 def enrich_with_lof8(lof_data: list[dict], lof8_info: dict[str, dict]) -> list[dict]:
     updated_status = 0
     updated_premium = 0
+    filled_est_nav = 0
     for item in lof_data:
         code = item.get("code", "")
         if code not in lof8_info:
@@ -314,10 +315,19 @@ def enrich_with_lof8(lof_data: list[dict], lof8_info: dict[str, dict]) -> list[d
             item["lof8_premium"] = info["lof8_premium"]
             item["lof8_est_nav"] = info.get("lof8_est_nav", 0)
             updated_premium += 1
+        # ★ 2026-07-29: 天天基金估值接口下线后，用lof8的estNav兜底盘中估算净值
+        lof8_est = info.get("lof8_est_nav", 0)
+        if not item.get("est_nav") and lof8_est > 0 and item.get("price", 0) > 0:
+            item["est_nav"] = lof8_est
+            item["premium_rt_est"] = round((item["price"] - lof8_est) / lof8_est * 100, 2)
+            item["est_source"] = "lof8"
+            filled_est_nav += 1
     if updated_status > 0:
         print(f"[lof8.cn] 覆盖了 {updated_status} 只LOF的申购状态")
     if updated_premium > 0:
         print(f"[lof8.cn] 添加了 {updated_premium} 只LOF的溢价交叉验证数据")
+    if filled_est_nav > 0:
+        print(f"[lof8.cn] 兜底补充了 {filled_est_nav} 只LOF的盘中估算净值(est_nav)")
     return lof_data
 
 
@@ -369,7 +379,9 @@ async def fetch_lof_from_tencent(lof_codes: list[str] = None) -> Optional[list[d
 
 
 # ============================================================
-#  净值核实: 天天基金 (est_nav核心) ★
+#  净值核实: 天天基金(主) + 新浪基金(备) ★ 2026-07-29多源改造
+#  背景: fundgz.1234567.com.cn 估值接口2026-07下线(返回404页面)
+#  新浪 f_<code> 批量接口返回: 名称,单位净值,累计净值,前日净值,净值日期,规模(亿)
 # ============================================================
 
 async def _fetch_single_nav_ttjj(client: httpx.AsyncClient, code: str) -> Optional[dict]:
@@ -392,62 +404,125 @@ async def _fetch_single_nav_ttjj(client: httpx.AsyncClient, code: str) -> Option
         return None
 
 
+async def _fetch_navs_from_sina(codes: list[str]) -> dict[str, dict]:
+    """新浪基金净值批量接口（备用源）。一次请求可查多只，GBK编码。
+    返回 {code: {nav, nav_date, est_nav=0, fund_size_yi}}，无盘中估值。"""
+    result: dict[str, dict] = {}
+    if not codes:
+        return result
+    headers = {"Referer": "https://finance.sina.com.cn",
+               "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    try:
+        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT, trust_env=False, headers=headers) as client:
+            for i in range(0, len(codes), 50):
+                batch = codes[i:i + 50]
+                url = SINA_URL + ",".join(f"f_{c}" for c in batch)
+                resp = await client.get(url)
+                text = resp.content.decode("gbk", errors="replace")
+                for line in text.splitlines():
+                    m = re.match(r'var hq_str_f_(\d{6})="([^"]*)"', line.strip())
+                    if not m:
+                        continue
+                    code, payload = m.group(1), m.group(2)
+                    parts = payload.split(",")
+                    if len(parts) >= 5 and parts[0]:
+                        nav = _safe_float(parts[1])
+                        if nav > 0:
+                            result[code] = {"code": code, "nav": nav, "nav_date": parts[4],
+                                            "est_nav": 0.0, "est_time": "",
+                                            "fund_size_yi": _safe_float(parts[5]) if len(parts) > 5 else 0.0}
+        print(f"[新浪基金] 批量获取到 {len(result)}/{len(codes)} 只净值")
+    except Exception as e:
+        print(f"[新浪基金] 获取失败: {e}")
+    return result
+
+
+def _apply_nav_result(item: dict, result: dict, source: str) -> None:
+    """将净值核实结果应用到单只LOF条目上（TTJJ/新浪共用）"""
+    real_price = item["price"]
+    real_nav = result["nav"]
+    est_nav = result.get("est_nav", 0)
+    verified_premium = round((real_price - real_nav) / real_nav * 100, 2) if real_nav > 0 else item["premium_rt"]
+    est_premium = round((real_price - est_nav) / est_nav * 100, 2) if est_nav > 0 else None
+    jsl_date = _parse_date(item.get("nav_date", ""))
+    src_date = _parse_date(result.get("nav_date", ""))
+    if src_date and jsl_date:
+        days_diff = (src_date - jsl_date).days
+        verify_note = f"净值更新+{days_diff}天" if days_diff > 0 else ("净值一致" if days_diff == 0 else f"净值早{abs(days_diff)}天")
+    else:
+        verify_note = "已核实"
+    item["nav_verified"] = real_nav
+    item["nav_date_verified"] = result["nav_date"]
+    item["nav_date_jisilu"] = item.get("nav_date", "")
+    item["premium_rt_jisilu"] = item["premium_rt"]
+    item["premium_rt_verified"] = verified_premium
+    if est_nav > 0:
+        item["premium_rt_est"] = est_premium
+    item["est_nav"] = est_nav
+    item["est_time"] = result.get("est_time", "")
+    item["verify_note"] = verify_note
+    item["verified"] = True
+    item["nav_source"] = source
+    if result.get("fund_size_yi", 0) > 0:
+        item["fund_size_sina"] = result["fund_size_yi"] * 100_000_000
+    premium_gap = item["premium_rt_jisilu"] - verified_premium
+    if abs(premium_gap) > 1:
+        est_info = f" | 实时溢价={est_premium:+.1f}%" if est_nav > 0 else ""
+        print(f"  [!] {item['code']} {item['name']}: 原={item['premium_rt_jisilu']:+.1f}% -> {source}={verified_premium:+.1f}%{est_info}")
+
+
 async def verify_navs_batch(candidates: list[dict]) -> list[dict]:
     if not candidates:
         return candidates
     to_verify = candidates[:NAV_VERIFY_MAX]
     print(f"[净值核实] 准备核实 {len(to_verify)} 只LOF的最新净值...")
-    semaphore = asyncio.Semaphore(NAV_VERIFY_CONCURRENCY)
+    # ---- 第1步: 探测天天基金fundgz接口是否存活（该接口2026-07起大面积失效）----
+    ttjj_alive = False
+    try:
+        async with httpx.AsyncClient(timeout=8, trust_env=False) as client:
+            probe = await _fetch_single_nav_ttjj(client, to_verify[0]["code"])
+            ttjj_alive = probe is not None
+    except Exception:
+        ttjj_alive = False
     verified_count = 0
-    async def verify_one(item: dict) -> dict:
-        nonlocal verified_count
-        async with semaphore:
-            async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT, trust_env=False) as client:
-                result = await _fetch_single_nav_ttjj(client, item["code"])
-                await asyncio.sleep(0.2)
-        if result and result["nav"] > 0:
-            verified_count += 1
-            real_price = item["price"]
-            real_nav = result["nav"]
-            est_nav = result.get("est_nav", 0)
-            verified_premium = round((real_price - real_nav) / real_nav * 100, 2) if real_nav > 0 else item["premium_rt"]
-            est_premium = round((real_price - est_nav) / est_nav * 100, 2) if est_nav > 0 else verified_premium
-            jsl_date = _parse_date(item.get("nav_date", ""))
-            ttjj_date = _parse_date(result.get("nav_date", ""))
-            if ttjj_date and jsl_date:
-                days_diff = (ttjj_date - jsl_date).days
-                verify_note = f"净值更新+{days_diff}天" if days_diff > 0 else ("净值一致" if days_diff == 0 else f"净值早{abs(days_diff)}天")
-            else:
-                verify_note = "已核实"
-            item["nav_verified"] = real_nav
-            item["nav_date_verified"] = result["nav_date"]
-            item["nav_date_jisilu"] = item.get("nav_date", "")
-            item["premium_rt_jisilu"] = item["premium_rt"]
-            item["premium_rt_verified"] = verified_premium
-            item["premium_rt_est"] = est_premium
-            item["est_nav"] = est_nav
-            item["est_time"] = result.get("est_time", "")
-            item["verify_note"] = verify_note
-            item["verified"] = True
-            premium_gap = item["premium_rt_jisilu"] - verified_premium
-            if abs(premium_gap) > 1:
-                est_info = f" | 实时溢价={est_premium:+.1f}%" if est_nav > 0 else ""
-                print(f"  [!] {item['code']} {item['name']}: JSL={item['premium_rt_jisilu']:+.1f}% -> TTJJ={verified_premium:+.1f}%{est_info}")
-        else:
+    # ---- 第2步: 天天基金逐只核实（含盘中估值est_nav，仅在接口存活时）----
+    if ttjj_alive:
+        semaphore = asyncio.Semaphore(NAV_VERIFY_CONCURRENCY)
+        async def verify_one(item: dict) -> None:
+            nonlocal verified_count
+            async with semaphore:
+                async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT, trust_env=False) as client:
+                    result = await _fetch_single_nav_ttjj(client, item["code"])
+                    await asyncio.sleep(0.2)
+            if result and result["nav"] > 0:
+                verified_count += 1
+                _apply_nav_result(item, result, "ttjj")
+        await asyncio.gather(*[verify_one(item) for item in to_verify])
+    else:
+        print("[净值核实] 天天基金fundgz接口不可用，直接切换新浪备用源")
+    # ---- 第3步: 未核实的用新浪批量接口兜底（无盘中估值，但有最新净值+规模）----
+    missing = [item for item in to_verify if not item.get("verified")]
+    if missing:
+        sina_navs = await _fetch_navs_from_sina([item["code"] for item in missing])
+        for item in missing:
+            result = sina_navs.get(item["code"])
+            if result and result["nav"] > 0:
+                verified_count += 1
+                _apply_nav_result(item, result, "sina")
+    # ---- 第4步: 仍失败的保留原值 ----
+    for item in to_verify:
+        if not item.get("verified"):
             item["nav_verified"] = item["nav"]
             item["nav_date_verified"] = item.get("nav_date", "")
             item["premium_rt_verified"] = item["premium_rt"]
             item["verified"] = False
-        return item
-    tasks = [verify_one(item) for item in to_verify]
-    verified_results = await asyncio.gather(*tasks)
     unverified = candidates[NAV_VERIFY_MAX:]
     for item in unverified:
         item["nav_verified"] = item["nav"]
         item["premium_rt_verified"] = item["premium_rt"]
         item["verified"] = False
     print(f"[净值核实] 完成: {verified_count}/{len(to_verify)} 核实成功")
-    return verified_results + unverified
+    return to_verify + unverified
 
 
 # ============================================================
@@ -709,13 +784,15 @@ def filter_arbitrage_opportunities(data: list[dict], fund_sizes: dict[str, float
             volume_level = "low"
         purchase_fee = item.get("purchase_fee", 0.15)
         net_premium = round(premium - purchase_fee - 0.01, 2) if premium > 0 else premium
-        opportunities.append({"premium_rt": premium, "premium_rt_dwjz": premium_dwjz,
+        # ★ 2026-07-29修复: **item 必须放在最前，否则item里的原始premium_rt(可能为0)
+        #   会覆盖这里计算好的实时溢价，导致API层>=3%过滤和自动买入全部失效
+        opportunities.append({**item, "premium_rt": premium, "premium_rt_dwjz": premium_dwjz,
                                "nav": nav, "nav_dwjz": item.get("nav_verified", item.get("nav", 0)),
                                "direction": "溢价套利" if is_premium else "折价套利",
                                "is_premium": is_premium, "verified": verified, "volume_level": volume_level,
                                "net_premium": net_premium, "fund_size": fund_size,
                                "signal_score": _calc_signal_score(premium, amount, item.get("turnover_rt", 0)),
-                               "ann_url": f"https://fundf10.eastmoney.com/jjgg_{code}.html", **item})
+                               "ann_url": f"https://fundf10.eastmoney.com/jjgg_{code}.html"})
     if filtered_by_volume > 0:
         print(f"[筛选] 成交额不足1000万: {filtered_by_volume} 只")
     if filtered_by_size > 0:
@@ -779,6 +856,15 @@ async def get_all_lof_arbitrage_opportunities(use_mock: bool = False) -> dict:
         lof_data = enrich_with_lof8(lof_data, lof8_info)
     codes_to_check = [item["code"] for item in lof_data if item.get("amount", 0) >= MIN_VOLUME]
     fund_sizes = await fetch_fund_sizes_batch(codes_to_check) if codes_to_check else {}
+    # ★ 2026-07-29: 东财规模解析缺失的，用新浪基金接口返回的规模兜底
+    sina_size_filled = 0
+    for item in lof_data:
+        code = item.get("code", "")
+        if code and code not in fund_sizes and item.get("fund_size_sina", 0) > 0:
+            fund_sizes[code] = item["fund_size_sina"]
+            sina_size_filled += 1
+    if sina_size_filled > 0:
+        print(f"[基金规模] 新浪源兜底补充 {sina_size_filled} 只")
     opportunities = filter_arbitrage_opportunities(lof_data, fund_sizes)
     if opportunities:
         opportunities = await verify_announcements_batch(opportunities)

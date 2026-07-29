@@ -218,7 +218,9 @@ def auto_buy_opportunities(opportunities: list[dict]) -> list[dict]:
             continue
         if opp.get("amount", 0) < 10_000_000:
             continue
-        premium = opp.get("premium_rt_est", opp.get("premium_rt", 0))
+        premium = opp.get("premium_rt_est", 0) or 0
+        if not premium:
+            continue
         name = opp.get("name", "")
         min_premium = 5.0 if _is_resource(name) else 3.0
         if abs(premium) < min_premium:
