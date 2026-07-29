@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LOF套利监测工具开源分享</title>
+<style>
+  body {
+    max-width: 680px; margin: 0 auto; padding: 24px 16px;
+    font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+    font-size: 15px; line-height: 1.8; color: #333;
+  }
+  h1 { font-size: 22px; line-height: 1.4; margin: 0 0 8px; }
+  h2 { font-size: 18px; margin: 32px 0 12px; padding-left: 10px; border-left: 3px solid #4a90d9; }
+  h3 { font-size: 16px; margin: 24px 0 8px; }
+  h4 { font-size: 15px; margin: 20px 0 6px; }
+  blockquote {
+    margin: 12px 0; padding: 10px 16px;
+    background: #f7f8fa; border-radius: 6px;
+    color: #666; font-size: 14px; border: none;
+  }
+  pre {
+    background: #2d2d2d; color: #e6e6e6; padding: 14px 16px;
+    border-radius: 6px; font-size: 13px; line-height: 1.6;
+    overflow-x: auto; white-space: pre-wrap; word-break: break-all;
+  }
+  code {
+    font-family: 'SF Mono','Consolas','Courier New',monospace;
+    background: #f0f0f0; padding: 2px 6px; border-radius: 3px;
+    font-size: 13px; color: #d63384;
+  }
+  pre code { background: none; color: #e6e6e6; padding: 0; }
+  a { color: #4a90d9; text-decoration: none; }
+  hr { border: none; border-top: 1px solid #eee; margin: 24px 0; }
+  ul, ol { padding-left: 20px; }
+  li { margin: 6px 0; }
+  p { margin: 10px 0; }
+  strong { color: #222; }
+  .tip {
+    background: #fff8e1; border-left: 3px solid #ffa726;
+    padding: 10px 14px; margin: 12px 0; border-radius: 0 6px 6px 0; font-size: 14px;
+  }
+  .cmd-label { font-weight: bold; color: #555; margin: 12px 0 4px; }
+</style>
+</head>
+<body>
+
+<h1>为了不错过下次六万块的套利机会，我用 AI 写了个 LOF 套利监测工具</h1>
+
+<blockquote>前两篇聊了 LOF 套利的坑和我的三步核实法。这篇是纯干货：代码怎么跑、定时任务怎么设，小白也能照着操作。</blockquote>
+
+<hr>
+
+<h2>先看效果</h2>
+
+<p>打开一个网页，就能看到全市场溢价超过 3% 的 LOF 基金。净值是核实过的，申购状态是实时查的，公告变动也会标出来。</p>
+
+<p>暂停申购的、每天只能买 10 块的、真正能买的——一目了然。</p>
+
+<p>项目地址：<a href="https://github.com/thindor/LOF-Notice"><strong>github.com/thindor/LOF-Notice</strong></a></p>
+
+<hr>
+
+<h2>零基础操作指南</h2>
+
+<p>下面分两种情况。如果你会用命令行就看 A，如果完全不懂技术就看 B。</p>
+
+<h3>A. 会用命令行的（3 步）</h3>
+
+<pre><code># 1. 下载代码
+git clone https://github.com/thindor/LOF-Notice.git
+cd LOF-Notice
+
+# 2. 安装依赖
+pip install -r requirements.txt
+
+# 3. 启动
+python main.py</code></pre>
+
+<p>然后浏览器打开 <code>http://localhost:8877</code>，完事。</p>
+
+<hr>
+
+<h3>B. 完全零基础（跟着步骤走）</h3>
+
+<p><strong>第一步：下载 Python</strong></p>
+
+<ol>
+  <li>打开 <a href="https://www.python.org/downloads/">python.org</a></li>
+  <li>点那个黄色的大按钮「Download Python」</li>
+  <li>下载完成后双击安装</li>
+  <li><strong>重要</strong>：安装界面第一页，<strong>勾选底部的「Add Python to PATH」</strong>，然后再点 Install</li>
+  <li>等待安装完成</li>
+</ol>
+
+<p><strong>第二步：下载项目代码</strong></p>
+
+<ol>
+  <li>打开 <a href="https://github.com/thindor/LOF-Notice">github.com/thindor/LOF-Notice</a></li>
+  <li>点绿色的「Code」按钮 → 点「Download ZIP」</li>
+  <li>下载后解压到桌面，会得到一个 <code>LOF-Notice</code> 文件夹</li>
+</ol>
+
+<p><strong>第三步：安装依赖</strong></p>
+
+<ol>
+  <li>按键盘 <code>Win + R</code>，输入 <code>cmd</code>，回车</li>
+  <li>黑色窗口打开后，输入以下命令（一行一行来，每行输完按回车）：</li>
+</ol>
+
+<pre><code>cd Desktop\LOF-Notice
+pip install -r requirements.txt</code></pre>
+
+<p>这一步会下载几个必要的库，等它跑完就行，大概需要一两分钟。</p>
+
+<p><strong>第四步：启动</strong></p>
+
+<p>还在那个黑色窗口里，输入：</p>
+
+<pre><code>python main.py</code></pre>
+
+<p>看到 <code>Uvicorn running on http://0.0.0.0:8877</code> 就说明成功了。</p>
+
+<p><strong>第五步：打开网页</strong></p>
+
+<p>浏览器地址栏输入 <code>http://localhost:8877</code>，回车。搞定。</p>
+
+<hr>
+
+<h2>每天 14:40 自动跑</h2>
+
+<p>想让电脑每天交易日下午自动刷新数据：</p>
+
+<h4>Windows</h4>
+
+<ol>
+  <li>键盘按 <code>Win</code>，搜索「任务计划程序」，打开</li>
+  <li>右侧点「创建基本任务」</li>
+  <li>名称填 <code>LOF监测</code>，下一步</li>
+  <li>触发器选「每周」，勾选周一至周五，下一步</li>
+  <li>时间填 <code>14:40</code>，下一步</li>
+  <li>操作选「启动程序」，下一步</li>
+  <li>程序填：<code>python</code>（如果提示找不到，就填 Python 安装路径，通常在 <code>C:\Users\你的用户名\AppData\Local\Programs\Python\Python3xx\python.exe</code>）</li>
+  <li>参数填：<code>scheduler.py</code></li>
+  <li>起始于填：你解压项目的路径，比如 <code>C:\Users\你的用户名\Desktop\LOF-Notice</code></li>
+  <li>完成</li>
+</ol>
+
+<h4>Mac</h4>
+
+<p>打开终端，输入：</p>
+
+<pre><code>crontab -e</code></pre>
+
+<p>按 <code>i</code> 进入编辑模式，粘贴这行：</p>
+
+<pre><code>40 14 * * 1-5 cd ~/Desktop/LOF-Notice && python3 scheduler.py</code></pre>
+
+<p>按 <code>Esc</code>，输入 <code>:wq</code>，回车。</p>
+
+<hr>
+
+<h2>注意事项</h2>
+
+<ul>
+  <li>如果你用的是公司电脑，网络走了代理，代码里已经处理好了。如果遇到网络错误，可以试试关掉代理再跑</li>
+  <li>不要在短时间内反复刷新，数据有 5 分钟缓存</li>
+  <li>收盘后（15:00 之后）溢价会收敛，数据变少是正常的</li>
+  <li>这个工具只帮你筛选，不替你下单。下单前自己去基金页面再核实一遍</li>
+</ul>
+
+<hr>
+
+<p>代码在 <a href="https://github.com/thindor/LOF-Notice"><strong>github.com/thindor/LOF-Notice</strong></a>，觉得有用就点个 Star。有什么问题或者改进想法，直接提 Issue 或者评论区聊。</p>
+
+<blockquote>免责声明：仅供研究学习，不构成投资建议。投资有风险，操作需谨慎。</blockquote>
+
+</body>
+</html>
